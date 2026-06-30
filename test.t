@@ -1,171 +1,97 @@
-def register(mcp: FastMCP) -> None:
-    """Attach all Insight tools to *mcp*."""
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-    # ====================================================================== #
-    # TOOL 1 — Portfolio Company Summary                                       #
-    # ====================================================================== #
-    @mcp.tool(
-        name="get_portfolio_company_summary",
-        description=(
-            "Get the PROFILE / OVERVIEW of a portfolio company (PC). "
-            "Use this FIRST when the user names a company — it returns the "
-            "PortfolioCompanyId that KPI, deal, and holdings tools need."
-        ),
-        tags={"insight", "portfolio"},
-        meta={"version": "1.0", "owner": "platform-team"},
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="MCP_", extra="ignore")
+
+    # Keycloak / OIDC realm base
+    realm_base_url: str  # e.g. https://foothill-neutron-outright.ngrok-free.dev/realms/mcp-demo
+
+    # OAuth client
+    client_id: str
+    client_secret: str
+    audience: str = "mcp-client"
+
+    # This server's own public URL (used for OAuth callback construction)
+    base_url: str
+    service_documentation_url: str | None = None
+
+    @property
+    def jwks_uri(self) -> str:
+        return f"{self.realm_base_url}/protocol/openid-connect/certs"
+
+    @property
+    def authorization_endpoint(self) -> str:
+        return f"{self.realm_base_url}/protocol/openid-connect/auth"
+
+    @property
+    def token_endpoint(self) -> str:
+        return f"{self.realm_base_url}/protocol/openid-connect/token"
+
+
+settings = Settings()
+MCP_REALM_BASE_URL=https://foothill-neutron-outright.ngrok-free.dev/realms/mcp-demo
+MCP_CLIENT_ID=mcp-client
+MCP_CLIENT_SECRET=8rqzL8Ps4TyDkaezvjWJq1R5RzOvL9v3
+MCP_AUDIENCE=mcp-client
+MCP_BASE_URL=https://common-eels-refuse.loca.lt
+MCP_SERVICE_DOCUMENTATION_URL=https://common-eels-refuse.loca.lt/docs
+from fastmcp.server.auth import OAuthProxy
+from fastmcp.server.auth.providers.jwt import JWTVerifier
+
+from config import settings
+
+
+def build_auth() -> OAuthProxy:
+    token_verifier = JWTVerifier(
+        jwks_uri=settings.jwks_uri,
+        issuer=settings.realm_base_url,
+        audience=settings.audience,
     )
-    async def get_portfolio_company_summary(
-        PortfolioCompanyId: str = "",
-        CompanyName: str = "",
-        CompanyStatus: str = "",
-        SectorName: str = "",
-        SubSectorName: str = "",
-        GroupName: str = "",
-        ReportingCurrencyCode: str = "",
-        pageNumber: int = 1,
-        pageSize: int = 50,
-    ) -> dict[str, Any]:
-        """
-        Get the PROFILE / OVERVIEW of a portfolio company (PC) — a real company that
-        a fund has invested in. Use this FIRST when the user names a company, because
-        it returns the **PortfolioCompanyId** that the KPI, deal, and holdings tools need.
 
-        WHEN TO USE:
-          - "Tell me about company X", "What sector is X in", "Who are X's co-investors".
-          - As STEP 1 of a chain whenever you need a PortfolioCompanyId from a company name.
-
-        INPUTS (all optional; pass only what you know — leave the rest blank):
-          - CompanyName: full or partial company name to search.
-          - PortfolioCompanyId: exact id if already known.
-          - SectorName / CompanyStatus / GroupName / ReportingCurrencyCode: extra filters.
-
-        OUTPUT: { data: [ { PortfolioCompanyId, CompanyName, SectorName, CompanyStatus,
-                  PercentageOwnership, OtherCoinvestors, ReportingCurrencyCode, ... } ],
-                  totalCount }. Extract `PortfolioCompanyId` to chain into
-                  get_company_kpi_values / get_deal_overview / get_fund_holdings.
-        """
-        payload = {
-            "filters": _clean({
-                "PortfolioCompanyId": PortfolioCompanyId,
-                "CompanyName": CompanyName,
-                "CompanyStatus": CompanyStatus,
-                "SectorName": SectorName,
-                "SubSectorName": SubSectorName,
-                "GroupName": GroupName,
-                "ReportingCurrencyCode": ReportingCurrencyCode,
-            }),
-            "pageNumber": pageNumber,
-            "pageSize": pageSize,
-        }
-        return await _post("/services/api/Insight/portfolio-company-summary", payload)
-
-    # ====================================================================== #
-    # TOOL 2 — Deal Overview                                                   #
-    # ====================================================================== #
-    @mcp.tool(
-        name="get_deal_overview",
-        description=(
-            "Get DEALS — the relationship between a FUND and a PORTFOLIO COMPANY. "
-            "Returns FundId and DealId. Use as a bridge from company → fund tools."
-        ),
-        tags={"insight", "deals"},
-        meta={"version": "1.0", "owner": "platform-team"},
+    return OAuthProxy(
+        upstream_authorization_endpoint=settings.authorization_endpoint,
+        upstream_token_endpoint=settings.token_endpoint,
+        upstream_client_id=settings.client_id,
+        upstream_client_secret=settings.client_secret,
+        token_verifier=token_verifier,
+        base_url=settings.base_url,
+        service_documentation_url=settings.service_documentation_url,
     )
-    async def get_deal_overview(
-        DealName: str = "",
-        CompanyName: str = "",
-        FundName: str = "",
-        SectorName: str = "",
-        InvestmentStage: str = "",
-        ExitMethod: str = "",
-        CurrencyCode: str = "",
-        pageNumber: int = 1,
-        pageSize: int = 50,
-    ) -> dict[str, Any]:
-        """
-        Get DEALS — the relationship between a FUND and a PORTFOLIO COMPANY. A deal
-        links a fund (the investor vehicle) to a company it invested in.
 
-        WHEN TO USE:
-          - "Which fund invested in company X?", "Show the deal/terms for X",
-            "What stage / exit method / ownership for company X's investment".
-          - As the BRIDGE step: returns **FundId** (chain into get_fund_track_record,
-            get_fund_investors, get_fund_summary) and **DealId**.
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 
-        INPUTS (all optional): CompanyName, FundName, DealName, SectorName,
-        InvestmentStage, ExitMethod, CurrencyCode.
+from fastmcp import FastMCP
 
-        OUTPUT: { data: [ { DealId, PortfolioCompanyId, CompanyName, FundId, FundName,
-                  InvestmentDate, CurrentExitOwnershipPercent, EnterpriseValue,
-                  ExitMethod, InvestmentStage, SecurityType, ... } ], totalCount }.
-        """
-        payload = {
-            "filters": _clean({
-                "DealName": DealName,
-                "CompanyName": CompanyName,
-                "FundName": FundName,
-                "SectorName": SectorName,
-                "InvestmentStage": InvestmentStage,
-                "ExitMethod": ExitMethod,
-                "CurrencyCode": CurrencyCode,
-            }),
-            "pageNumber": pageNumber,
-            "pageSize": pageSize,
-        }
-        return await _post("/services/api/Insight/deal-overview", payload)
+import tools
+from auth import build_auth
+from middleware import TokenStateMiddleware
 
-    # ====================================================================== #
-    # TOOL 3 — Fund Summary                                                    #
-    # ====================================================================== #
-    @mcp.tool(
-        name="get_fund_summary",
-        description=(
-            "Get the PROFILE of a FUND: strategy, firm, currency, region, "
-            "fund size, fees, vintage year, etc."
+
+def register_all(mcp: FastMCP) -> None:
+    tools.register(mcp)
+
+
+def create_app():
+    mcp = FastMCP(auth=build_auth())
+    register_all(mcp)
+
+    middleware = [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
         ),
-        tags={"insight", "fund"},
-        meta={"version": "1.0", "owner": "platform-team"},
-    )
-    async def get_fund_summary(
-        FundName: str = "",
-        FirmName: str = "",
-        Strategy: str = "",
-        SectorName: str = "",
-        CurrencyCode: str = "",
-        VintageYear: str = "",
-        RegionName: str = "",
-        CountryName: str = "",
-        pageNumber: int = 1,
-        pageSize: int = 50,
-    ) -> dict[str, Any]:
-        """
-        Get the PROFILE of a FUND (a fund is itself a company / investing vehicle):
-        strategy, firm, currency, region, fund size, fees, vintage, etc.
+        Middleware(TokenStateMiddleware),
+    ]
 
-        WHEN TO USE:
-          - "Tell me about fund Y", "What strategy/region/currency is fund Y",
-            "What firm manages fund Y".
-          - If you only have a FundId from get_deal_overview, pass FundName
-            (also returned by that tool) to look up the fund here.
+    return mcp.http_app(middleware=middleware)
 
-        INPUTS (all optional): FundName, FirmName, Strategy, SectorName, CurrencyCode,
-        VintageYear, RegionName, CountryName.
 
-        OUTPUT: { data: [ { FundId, FundName, FirmName, Strategy, CurrencyCode,
-                  RegionName, CountryName, ... } ], totalCount }.
-        """
-        payload = {
-            "filters": _clean({
-                "FundName": FundName,
-                "FirmName": FirmName,
-                "Strategy": Strategy,
-                "SectorName": SectorName,
-                "CurrencyCode": CurrencyCode,
-            }),
-            "VintageYear": VintageYear,
-            "RegionName": RegionName,
-            "CountryName": CountryName,
-            "pageNumber": pageNumber,
-            "pageSize": pageSize,
-        }
-        return await _post("/services/api/Insight/fund-summary", payload)
+app = create_app()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8888)
