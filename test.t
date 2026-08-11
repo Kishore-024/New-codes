@@ -1,1 +1,1 @@
-https://uat.beatapps.net/foliosure/mcp/consent?txn_id=mJg0bWy0TEjmamRAELxPFBDvJ36kemlzdD0gYCcj_L8
+https://uat.beatapps.net/foliosure/mcp/consent?txn_id=erhkr9NX6KFnLYGfGO20LYvhO-orSi_fUy0_sBLgndA
